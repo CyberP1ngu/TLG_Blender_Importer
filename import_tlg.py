@@ -33,7 +33,7 @@ class TLGAddonPreferences(bpy.types.AddonPreferences):
 
     dds_converter_path: StringProperty(
         name="GNF to DDS Converter .exe",
-        description="Path to your '__From_GNF_To_DDS__ScarletLibrary_.exe' tool",
+        description="Path to your '__From_GNF_To_DDS_DXT5__GFDLibrary_.exe' tool",
         subtype='FILE_PATH',
         default="",
     )

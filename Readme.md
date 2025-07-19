@@ -8,7 +8,7 @@ The tool is designed to handle the game's custom .BOD (model/skeleton) and .DATA
 
 Blender: Version 4.5 or newer (might works on older version too).
 
-GNF to DDS Converter: You must have a copy of [\_\_From_GNF_To_DDS__ScarletLibrary_.exe](https://github.com/JADERLINK/ImageConvert/tree/main) or a similar GNF-to-DDS conversion tool. The add-on calls this executable to convert textures on the fly.
+GNF to DDS Converter: You must have a copy of [\_\_From_GNF_To_DDS_DXT5__GFDLibrary_.exe](https://github.com/JADERLINK/ImageConvert/tree/main) or a similar GNF-to-DDS conversion tool. The add-on calls this executable to convert textures on the fly.
 
 Paths: The importer attempts to automatically locate the TEXTURES directory based on the path of the imported .BOD file. For this to work, you should maintain the game's original `GAME/ASSETS/` and `GAME/TEXTURES/` directory structure.
 
