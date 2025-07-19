@@ -39,10 +39,11 @@ Before you can import models with textures, you must tell the add-on where to fi
 4. Click Import TLG Model.
 
 ### Importing a Model (.BOD)
-1. Go to `File > Import > The Last Guardian (.bod)`.
-2. Navigate to the directory containing the Model `.BOD` file.
-3. Select the model `.BOD` file you wish to import.
-4. Click Import TLG Model. The importer will automatically load the model, materials, and skinning data.
+1. Select the previously imported skeleton in Object Mode.
+2. Go to `File > Import > The Last Guardian (.bod)`.
+3. Navigate to the directory containing the Model `.BOD` file.
+4. Select the model `.BOD` file you wish to import.
+5. Click Import TLG Model. The importer will automatically load the model, materials, and skinning data.
 
 ### Importing an Animation (.DATA)
 Important: You must import and select the model's skeleton before importing an animation.
