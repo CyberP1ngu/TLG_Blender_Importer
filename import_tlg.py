@@ -126,7 +126,7 @@ class TLGReader:
 
         # 2. Check for a selected armature
         if self.context.active_object and self.context.active_object.type == 'ARMATURE':
-            print("  - Found selected armature in scene.")
+
             return self.context.active_object
 
         # 3. Fallback to the first armature found in the scene.
@@ -620,7 +620,10 @@ class TLGReader:
     def apply_skinning_data(self, blender_obj, render_ext_obj):
         skin_cluster = next((obj for obj in self.object_map.values() if
                              isinstance(obj, SkinCluster) and obj.name.endswith(render_ext_obj.name)), None)
+
         if not skin_cluster: return
+
+
 
         armature_obj = self.find_armature_in_scene()
         if not armature_obj:
@@ -659,21 +662,57 @@ class TLGReader:
             if name not in blender_obj.vertex_groups: blender_obj.vertex_groups.new(name=name)
         search_pattern = os.path.join(self.directory, f"*_{render_ext_obj.name}.weights")
         weights_filepaths = glob.glob(search_pattern)
+
         if weights_filepaths: self.parse_and_apply_weights(blender_obj, render_ext_obj, weights_filepaths[0],
                                                            skin_cluster.boneNames)
 
     def parse_and_apply_weights(self, blender_obj, render_ext_obj, weights_filepath, bone_names_map):
+
+
+        if render_ext_obj.numVerts == 0:
+            print("  - !!! ERROR: numVerts is 0. No weights will be applied. !!!")
+            return
+
         with open(weights_filepath, 'rb') as f:
+            file_size = os.fstat(f.fileno()).st_size
+            # Calculate stride = (total size - header size) / number of vertices
+            stride = (file_size - 16) // render_ext_obj.numVerts
+
+            #print(f"  - Detected Stride: {stride} bytes per vertex.")
+
+            vert_data_struct = None
+            num_influences = 0
+
+            if stride == 32:  # Standard 4-influence format
+                vert_data_struct = struct.Struct('<4I4f')
+                num_influences = 4
+
+            elif stride == 64:  # New 8-influence format
+                vert_data_struct = struct.Struct('<8I8f')
+                num_influences = 8
+
+            else:
+                print(f"  - !!! ERROR: Unknown or unsupported stride of {stride} bytes. Aborting. !!!")
+                return
+
             f.seek(16)
-            vert_data_struct = struct.Struct('<4I4f')
+            applied_weights_count = 0
+
             for i in range(render_ext_obj.numVerts):
-                if f.tell() + vert_data_struct.size > os.fstat(f.fileno()).st_size: break
+                if f.tell() + vert_data_struct.size > file_size: break
+
                 unpacked_data = vert_data_struct.unpack(f.read(vert_data_struct.size))
-                indices, weights = unpacked_data[:4], unpacked_data[4:]
-                for j in range(4):
+                indices = unpacked_data[:num_influences]
+                weights = unpacked_data[num_influences:]
+
+                for j in range(num_influences):
                     if weights[j] > 1e-5 and indices[j] < len(bone_names_map):
                         vgroup = blender_obj.vertex_groups.get(bone_names_map[indices[j]])
-                        if vgroup: vgroup.add([i], weights[j], 'ADD')
+                        if vgroup:
+                            vgroup.add([i], weights[j], 'ADD')
+                            applied_weights_count += 1
+
+
 
     def apply_material_data(self, blender_obj, render_ext_obj):
         print(f"\n--- Applying material for '{blender_obj.name}' ---")
@@ -719,12 +758,29 @@ class TLGReader:
 
     def create_texture_node(self, material, tex_name, link_socket, tex_type, is_normal_map=False, is_albedo=False):
         if not tex_name or tex_name.lower() == "_black_texture": return None
-        if not self.texture_base_path: return None
 
-        base_tex_name = tex_name.split('/')[-1]
-        gnf_path = os.path.join(self.texture_base_path, base_tex_name + ".GNF")
 
-        dds_path = self.convert_gnf_to_dds(gnf_path)
+        if not (self.texture_base_path and os.path.isdir(self.texture_base_path)):
+            print(f"  - FATAL ERROR: self.texture_base_path is not a valid directory.")
+            print(f"    - Value is: {repr(self.texture_base_path)}")  # repr() shows hidden characters
+            return None
+
+
+        target_filename_lower = (tex_name.split('/')[-1] + ".GNF").lower()
+        found_gnf_path = None
+
+        # We already know the directory is valid, so no need for a try..except here
+        for filename in os.listdir(self.texture_base_path):
+            if filename.lower() == target_filename_lower:
+                found_gnf_path = os.path.join(self.texture_base_path, filename)
+                break
+
+        if not found_gnf_path:
+            print(f"    - ERROR: Could not find texture '{target_filename_lower}' in directory.")
+            return None
+
+        # Use the correctly-cased path from now on.
+        dds_path = self.convert_gnf_to_dds(found_gnf_path)
 
         if not dds_path:
             print(f"    - Failed to find or convert texture. Skipping node creation for '{tex_name}'.")
@@ -839,22 +895,60 @@ class TLGReader:
     def find_texture_path(self):
         print("--- Searching for texture directory ---")
         try:
-            parts = os.path.normpath(self.directory).split(os.sep)
+            model_dir = os.path.normpath(os.path.dirname(self.filepath))
+            parts = model_dir.split(os.sep)
+
+            # Find the base 'GAME' directory
             game_index = [p.upper() for p in parts].index('GAME')
             game_dir = os.sep.join(parts[:game_index + 1])
-            asset_parts = parts[game_index + 2:]
 
-            # Handle path structures like ASSETS/CHARA/SKIN/BOYA -> TEXTURES/CHARA/BOYA
-            if len(asset_parts) > 2 and asset_parts[1].upper() == 'SKIN':
-                path = os.path.join(game_dir, 'TEXTURES', asset_parts[0], asset_parts[2])
-                print(f"  - Found character texture path: {path}")
-                return path
-            else:  # Handle simpler paths like ASSETS/PROPS/BARREL -> TEXTURES/PROPS/BARREL
-                path = os.path.join(game_dir, 'TEXTURES', *asset_parts)
-                print(f"  - Found generic texture path: {path}")
-                return path
-        except:
-            print("  - ERROR: Could not determine texture directory from model path.")
+            # Get the path components after GAME (e.g., ['ASSETS', 'CHARA', 'SKIN', 'CONDORA'])
+            path_components = parts[game_index + 1:]
+
+            texture_path = None
+
+            # Specifically handle the character skin path structure:
+            # From: ASSETS/CHARA/SKIN/MODEL_NAME
+            # To:   TEXTURES/CHARA/MODEL_NAME
+            if (len(path_components) >= 4 and
+                    path_components[0].upper() == 'ASSETS' and
+                    path_components[1].upper() == 'CHARA' and
+                    path_components[2].upper() == 'SKIN'):
+
+                model_variant_name = path_components[3]  # e.g., 'CONDORA'
+
+                # Special case only for 'CONDORA' to handle the name mismatch.
+                if model_variant_name.upper() == 'CONDORA':
+                    base_model_name = 'CONDOR'
+                else:
+                    # For all other models, use the name as-is.
+                    base_model_name = model_variant_name
+
+                # Construct the correct path
+                texture_path = os.path.join(game_dir, 'TEXTURES', path_components[1], base_model_name)
+
+            else:
+                # Fallback for other asset types (replaces ASSETS with TEXTURES)
+                try:
+                    assets_index = path_components.index('ASSETS')
+                    path_components[assets_index] = 'TEXTURES'
+                    texture_path = os.path.join(game_dir, *path_components)
+                except ValueError:
+                    print("  - WARNING: Could not determine texture path via fallback.")
+                    return None
+
+            # Final validation
+            if texture_path and os.path.isdir(texture_path):
+                final_path = os.path.normpath(texture_path)
+                print(f"  - SUCCESS: Found and validated texture path: {final_path}")
+                return final_path
+            else:
+                print(f"  - WARNING: Constructed texture path is not a valid directory: {texture_path}")
+                return None
+
+        except Exception as e:
+            print(f"  - ERROR: An unexpected error occurred in find_texture_path: {e}")
+            traceback.print_exc()
             return None
 
     def build_skeleton(self, skel_obj):

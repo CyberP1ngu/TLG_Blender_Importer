@@ -56,4 +56,5 @@ Important: You must import and select the model's skeleton before importing an a
 (You maybe have to reselect the created action in the dope sheet to see the animation)
 
 ## Notes
-Materials are not 100% accurate, normal maps dont work correctly and strength has been set to 0.0
+-Materials are not 100% accurate, normal maps dont work correctly and strength has been set to 0.0. 
+-Some textures might not import correctly and need manual fixing. 
