@@ -26,7 +26,7 @@ Before you can import models with textures, you must tell the add-on where to fi
 
 2. Find "The Last Guardian Importer" in the list and expand it.
 
-3. In the Preferences section, click the folder icon next to GNF to DDS Converter .exe and navigate to where you have saved the `__From_GNF_To_DDS__ScarletLibrary_.exe` file.
+3. In the Preferences section, click the folder icon next to GNF to DDS Converter .exe and navigate to where you have saved the `__From_GNF_To_DDS_DXT5__GFDLibrary_.exe` file.
 
 4. Save your preferences. The add-on is now ready to use.
 
