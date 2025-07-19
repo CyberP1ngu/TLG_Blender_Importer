@@ -6,7 +6,7 @@ The tool is designed to handle the game's custom .BOD (model/skeleton) and .DATA
 
 ## Requirements
 
-Blender: Version 4.5 or newer (might works on older version too).
+Blender: Version 4.5 or newer (might work on older versions too).
 
 GNF to DDS Converter: You must have a copy of [\_\_From_GNF_To_DDS_DXT5__GFDLibrary_.exe](https://github.com/JADERLINK/ImageConvert/tree/main) or a similar GNF-to-DDS conversion tool. The add-on calls this executable to convert textures on the fly.
 
@@ -31,11 +31,18 @@ Before you can import models with textures, you must tell the add-on where to fi
 4. Save your preferences. The add-on is now ready to use.
 
 ## How To Use
+
+### Importing a Skeleton (.BOD)
+1. Go to `File > Import > The Last Guardian (.bod)`.
+2. Navigate to the directory containing the Skeleton `.BOD`file.
+3. Select the Skeleton `.BOD` file you wish to import.
+4. Click Import TLG Model.
+
 ### Importing a Model (.BOD)
 1. Go to `File > Import > The Last Guardian (.bod)`.
-2. Navigate to the directory containing the `.BOD` file and its associated `.DATA` and `.WEIGHTS` files.
+2. Navigate to the directory containing the Model `.BOD` file.
 3. Select the model `.BOD` file you wish to import.
-4. Click Import TLG Model. The importer will automatically load the model, skeleton, materials, and skinning data.
+4. Click Import TLG Model. The importer will automatically load the model, materials, and skinning data.
 
 ### Importing an Animation (.DATA)
 Important: You must import and select the model's skeleton before importing an animation.
@@ -45,6 +52,7 @@ Important: You must import and select the model's skeleton before importing an a
 3. Go to `File > Import > The Last Guardian Animation (.data)`.
 4. Navigate to and select the .DATA animation file.
 5. The animation will be loaded as a new Action and applied to the selected armature.
+(You maybe have to reselect the created action in the dope sheet to see the animation)
 
 ## Notes
 Materials are not 100% accurate, normal maps dont work correctly and strength has been set to 0.0
