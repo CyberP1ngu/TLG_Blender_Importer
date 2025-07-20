@@ -16,6 +16,10 @@ import glob
 import traceback
 import subprocess
 import math
+import numpy as np
+import cProfile
+import pstats
+import io
 from mathutils import Matrix, Quaternion, Vector
 from bpy.props import (
     StringProperty,
@@ -1102,7 +1106,10 @@ class ImportTLGAnim(bpy.types.Operator, ImportHelper):
             return {'CANCELLED'}
 
         try:
+            # This is the crucial part:
+            # 1. Create an instance of the reader
             reader = TLGAnimReader(self.filepath, armature, context, self.scale)
+            # 2. Call the .read() method to start the import and profiling
             return reader.read()
         except Exception as e:
             self.report({'ERROR'}, f"Failed to import animation: {e}. See console for details.")
@@ -1120,12 +1127,9 @@ class ImportTLGAnim(bpy.types.Operator, ImportHelper):
 
 class TLGAnimReader:
     """
-    Final version of the TLG .DATA animation parser.
-    Correctly calculates pose transforms relative to the parent bone's space.
+    Parses single and multi-animation .DATA files from The Last Guardian
+    and applies them to a selected armature.
     """
-
-    # World-space correction for the root bone
-    ROOT_CORRECTION_QUAT = Quaternion((math.sqrt(0.5), -math.sqrt(0.5), 0, 0))
 
     def __init__(self, filepath, armature, context, scale):
         self.filepath = filepath
@@ -1133,73 +1137,221 @@ class TLGAnimReader:
         self.context = context
         self.global_scale = scale
         self.raw_data = None
-        self.header = {}
-        self.info_table = []
-        self.animation_data_cache = {}
+        # This list will hold the parsed data for one or more animations.
+        self.animations = []
 
     def read(self):
-        """Main entry point to read and apply the animation."""
-        print("--- Starting Animation Import ---")
-        with open(self.filepath, 'rb') as f:
-            self.raw_data = f.read()
+        """
+        Main entry point. This version correctly interleaves parsing, applying,
+        and profiling for each animation individually.
+        """
+        try:
+            print("--- Starting Animation Import (Corrected Per-Animation Profiling) ---")
+            with open(self.filepath, 'rb') as f:
+                self.raw_data = f.read()
 
-        self.read_header()
-        self.read_info_table_and_cache_data()
+            if self.raw_data[0:4] != b'CDAT':
+                raise ValueError("Invalid magic number. Expected 'CDAT'.")
 
-        action = bpy.data.actions.new(name=os.path.splitext(os.path.basename(self.filepath))[0])
-        if not self.armature.animation_data:
-            self.armature.animation_data_create()
-        self.armature.animation_data.action = action
+            field_0x10 = struct.unpack('<I', self.raw_data[0x10:0x14])[0]
+            is_multi_animation = field_0x10 > 200
 
-        self.apply_animation_to_bones(action)
+            if is_multi_animation:
+                print("Parsing as Multi-Animation File...")
+                num_anims = field_0x10
 
-        print("\n--- Animation import finished. ---")
+                # Get main header pointers
+                p_name_list = struct.unpack('<I', self.raw_data[0x18:0x1C])[0]
+                p_anim_offsets = struct.unpack('<I', self.raw_data[0x20:0x24])[0]
+                p_anim_info_base = struct.unpack('<I', self.raw_data[0x24:0x28])[0]
+
+                POINTER_FIX = 16
+                addr_anim_offsets_list = p_anim_offsets + POINTER_FIX
+                addr_anim_info_block = p_anim_info_base + POINTER_FIX
+                addr_name_offsets_list = 0x30
+
+                # --- THIS IS NOW THE MAIN LOOP ---
+                for i in range(num_anims):
+                    # Create and enable the profiler to measure everything for this one animation
+                    pr = cProfile.Profile()
+                    pr.enable()
+
+                    # 1. PARSE a single animation's info
+                    name_rel_offset = struct.unpack('<I', self.raw_data[
+                                                          addr_name_offsets_list + i * 4: addr_name_offsets_list + (
+                                                                      i + 1) * 4])[0]
+                    name_addr = p_name_list + POINTER_FIX + name_rel_offset
+                    anim_name_full = self.raw_data[name_addr:].split(b'\0', 1)[0].decode('ascii', 'ignore')
+                    anim_name = anim_name_full.split('/')[-1]
+
+                    info_offset = struct.unpack('<I', self.raw_data[
+                                                      addr_anim_offsets_list + i * 4: addr_anim_offsets_list + (
+                                                                  i + 1) * 4])[0]
+                    current_anim_base_addr = addr_anim_info_block + info_offset
+
+                    frame_rate, _, num_entries, frame_count = struct.unpack('<IfII', self.raw_data[
+                                                                                     current_anim_base_addr: current_anim_base_addr + 16])
+
+                    anim_data = {
+                        'name': anim_name if anim_name else f"animation_{i}",
+                        'frame_count': frame_count,
+                        'frame_rate': frame_rate or 30,
+                    }
+                    print(
+                        f"\n--- Processing animation: '{anim_data['name']}' ({num_entries} Tracks, {frame_count} Frames) ---")
+
+                    # 2. PARSE THE TRACK DATA (This is the suspected slow part)
+                    anim_data['tracks'] = self._parse_tracks(
+                        num_entries=num_entries,
+                        num_frames=frame_count,
+                        info_table_start=32,
+                        base_addr=current_anim_base_addr,
+                        offset_fix=0
+                    )
+
+                    # 3. APPLY THE KEYFRAMES
+                    self.apply_animation_to_bones(anim_data)
+
+                    # 4. STOP PROFILING and print the report
+                    pr.disable()
+                    s = io.StringIO()
+                    ps = pstats.Stats(pr, stream=s).sort_stats('tottime')
+                    ps.print_stats(30)
+
+                    print("\n" + "=" * 80)
+                    print(f"PROFILING REPORT FOR: '{anim_data['name']}'")
+                    print("=" * 80)
+                    print(s.getvalue())
+                    print("=" * 80 + "\n")
+
+            else:  # Handle single animation file
+                print("Parsing as Single-Animation File...")
+                self._parse_single_animation_file()
+                # Apply the single parsed animation
+                if self.animations:
+                    self.apply_animation_to_bones(self.animations[0])
+
+        except (ValueError, struct.error, IndexError) as e:
+            print(f"An error occurred during parsing: {e}")
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+        print(f"\n--- Full import process finished. ---")
         return {'FINISHED'}
 
-    def read_header(self):
-        """Reads the 48-byte file header."""
+    def _parse_single_animation_file(self):
+        """Parses a file containing a single animation."""
         header_format = '<4s12xIfII'
-        magic, frame_rate, _, info_table_entries, frame_count = struct.unpack(
+        _, frame_rate, _, num_entries, frame_count = struct.unpack(
             header_format, self.raw_data[:struct.calcsize(header_format)]
         )
-        self.header = {
-            'magic': magic.decode('ascii', 'ignore'),
-            'info_table_entries': info_table_entries,
-            'frame_count': frame_count,
-            'frame_rate': frame_rate or 30
-        }
-        if self.header['magic'] != 'CDAT':
-            raise ValueError(f"Invalid magic number: {self.header['magic']}.")
-        print(
-            f"Parsing Animation: {self.header['info_table_entries']} Tracks, "
-            f"{self.header['frame_count']} Frames @ {self.header['frame_rate']}fps"
-        )
 
-    def read_info_table_and_cache_data(self):
-        """Reads track metadata and caches the raw animation data for all tracks."""
-        info_table_start = 0x30
-        offset_fix = 16
-        num_frames = self.header['frame_count']
-        for i in range(self.header['info_table_entries']):
-            entry_start = info_table_start + (i * 32)
-            flag, ptr_trans, ptr_rot, ptr_scale, bone_name_ptr = struct.unpack('<IIIII', self.raw_data[
-                                                                                         entry_start: entry_start + 20])
-            bone_name_start = bone_name_ptr + offset_fix
-            bone_name = self.raw_data[bone_name_start:].split(b'\0')[0].decode('ascii', 'ignore')
-            self.info_table.append({'name': bone_name, 'flag': flag})
-            trans_keys = num_frames if flag in [5, 4, 0] else 1
-            rot_keys = num_frames if flag in [6, 4, 0] else 1
-            scale_keys = num_frames if flag in [0, 3] else 1
-            self.animation_data_cache[bone_name] = {
-                'T': self._unpack_data(ptr_trans + offset_fix, trans_keys, 'vec3'),
-                'R': self._unpack_data(ptr_rot + offset_fix, rot_keys, 'quat'),
-                'S': self._unpack_data(ptr_scale + offset_fix, scale_keys, 'vec3')
+        anim_data = {
+            'name': os.path.splitext(os.path.basename(self.filepath))[0],
+            'frame_count': frame_count,
+            'frame_rate': frame_rate or 30,
+        }
+        print(f"  - Found animation '{anim_data['name']}' ({num_entries} Tracks, {frame_count} Frames)")
+
+        # In single-anim files, pointers are absolute but need a 16-byte offset fix.
+        anim_data['tracks'] = self._parse_tracks(
+            num_entries=num_entries,
+            num_frames=frame_count,
+            info_table_start=0x30,  # Table starts right after the header
+            base_addr=0,
+            offset_fix=16
+        )
+        self.animations.append(anim_data)
+
+    def _parse_multi_animation_file(self, num_anims):
+        """Parses a file containing multiple animations."""
+        # Correctly unpack each pointer from its specific 4-byte address.
+        p_name_list = struct.unpack('<I', self.raw_data[0x18:0x1C])[0]
+        p_anim_offsets = struct.unpack('<I', self.raw_data[0x20:0x24])[0]
+        p_anim_info_base = struct.unpack('<I', self.raw_data[0x24:0x28])[0]
+
+        POINTER_FIX = 16  # This offset applies to the main header pointers
+        addr_anim_offsets_list = p_anim_offsets + POINTER_FIX
+        addr_anim_info_block = p_anim_info_base + POINTER_FIX
+        addr_name_offsets_list = 0x30  # Name offsets start after the main 48-byte header
+
+        for i in range(num_anims):
+            # 1. Get the animation's name
+            name_rel_offset = \
+            struct.unpack('<I', self.raw_data[addr_name_offsets_list + i * 4: addr_name_offsets_list + (i + 1) * 4])[0]
+            name_addr = p_name_list + POINTER_FIX + name_rel_offset
+            anim_name_full = self.raw_data[name_addr:].split(b'\0', 1)[0].decode('ascii', 'ignore')
+            anim_name = anim_name_full.split('/')[-1]
+
+            # 2. Get the base address for this specific animation's info table
+            info_offset = \
+            struct.unpack('<I', self.raw_data[addr_anim_offsets_list + i * 4: addr_anim_offsets_list + (i + 1) * 4])[0]
+            current_anim_base_addr = addr_anim_info_block + info_offset
+
+            # 3. Parse this animation's specific 32-byte header
+            frame_rate, _, num_entries, frame_count = struct.unpack('<IfII', self.raw_data[
+                                                                             current_anim_base_addr: current_anim_base_addr + 16])
+
+            anim_data = {
+                'name': anim_name if anim_name else f"animation_{i}",
+                'frame_count': frame_count,
+                'frame_rate': frame_rate or 30,
             }
+            print(f"  - Found animation '{anim_data['name']}' ({num_entries} Tracks, {frame_count} Frames)")
+
+            # 4. Parse the tracks for this animation. Pointers are relative to its base address.
+            anim_data['tracks'] = self._parse_tracks(
+                num_entries=num_entries,
+                num_frames=frame_count,
+                info_table_start=32,  # Track list starts after the 32-byte anim-specific header
+                base_addr=current_anim_base_addr,
+                offset_fix=0  # No +16 fix for multi-anim track pointers
+            )
+            self.animations.append(anim_data)
+
+    def _parse_tracks(self, num_entries, num_frames, info_table_start, base_addr, offset_fix):
+        """Generic method to read track metadata and cache animation data."""
+        animation_data_cache = {}
+        for i in range(num_entries):
+            entry_offset = base_addr + info_table_start + (i * 32)
+            flag, ptr_trans, ptr_rot, ptr_scale, ptr_bone_name = struct.unpack('<IIIII', self.raw_data[
+                                                                                         entry_offset: entry_offset + 20])
+
+            bone_name_addr = base_addr + ptr_bone_name + offset_fix
+
+            # Find the end of the string without slicing the whole file
+            end_index = self.raw_data.find(b'\0', bone_name_addr)
+            if end_index != -1:
+                # Slice only the part we need
+                bone_name_bytes = self.raw_data[bone_name_addr:end_index]
+            else:
+                # Fallback in case a name is not null-terminated (unlikely)
+                bone_name_bytes = self.raw_data[bone_name_addr:bone_name_addr + 128]
+
+            bone_name = bone_name_bytes.decode('ascii', 'ignore')
+
+
+            # Determine key counts based on the track flag
+            trans_keys = num_frames if flag in [0, 3, 4, 5] else 1
+            rot_keys = num_frames if flag in [0, 4, 6] else 1
+            scale_keys = num_frames if flag in [0, 3] else 1
+
+            animation_data_cache[bone_name] = {
+                'T': self._unpack_data(base_addr + ptr_trans + offset_fix, trans_keys, 'vec3'),
+                'R': self._unpack_data(base_addr + ptr_rot + offset_fix, rot_keys, 'quat'),
+                'S': self._unpack_data(base_addr + ptr_scale + offset_fix, scale_keys, 'vec3')
+            }
+        return animation_data_cache
 
     def _unpack_data(self, start_offset, num_keys, data_type):
-        """Unpacks a raw block of animation data."""
+        """Unpacks a raw block of vec3/quat animation data."""
         values = []
-        data_block = self.raw_data[start_offset: start_offset + (12 * num_keys)]
+        bytes_to_read = 12 * num_keys
+        if start_offset + bytes_to_read > len(self.raw_data):
+            # Return default value if data is out of bounds
+            return [Vector((0, 0, 0))] if data_type == 'vec3' else [Quaternion((1, 0, 0, 0))]
+
+        data_block = self.raw_data[start_offset: start_offset + bytes_to_read]
         for i in range(num_keys):
             chunk = data_block[i * 12: (i + 1) * 12]
             try:
@@ -1211,41 +1363,50 @@ class TLGAnimReader:
                     w = math.sqrt(1.0 - min(1.0, mag_sq)) if mag_sq <= 1.001 else 0.0
                     values.append(Quaternion((w, x, y, z)))
             except struct.error:
-                if data_type == 'vec3':
-                    values.append(Vector((0, 0, 0)))
-                else:
-                    values.append(Quaternion((1, 0, 0, 0)))
+                # Append default value on unpacking error
+                values.append(Vector((0, 0, 0)) if data_type == 'vec3' else Quaternion((1, 0, 0, 0)))
         return values
 
-    def apply_animation_to_bones(self, action):
-        """Iterates through frames and bones to calculate and apply local keyframes."""
+    def apply_animation_to_bones(self, anim_data):
+        """
+        Calculates and applies local keyframes for a single animation action.
+        This version hoists invariant matrix math out of the main loop for maximum speed.
+        """
         if self.armature.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
-        num_frames = self.header['frame_count']
+        action = bpy.data.actions.new(name=anim_data['name'])
+        if not self.armature.animation_data:
+            self.armature.animation_data_create()
+        self.armature.animation_data.action = action
 
-        fcurves = {}
-        for track_info in self.info_table:
-            bone_name = track_info['name']
-            if self.armature.pose.bones.get(bone_name):
-                fcurves[bone_name] = {
-                    'location': [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].location', index=i) for i in
-                                 range(3)],
-                    'rotation': [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].rotation_quaternion', index=i)
-                                 for i in range(4)],
-                    'scale': [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].scale', index=i) for i in
-                              range(3)]
-                }
+        num_frames = anim_data['frame_count']
+        if num_frames == 0:
+            return
 
-        for frame_idx in range(num_frames):
-            for track_info in self.info_table:
-                bone_name = track_info['name']
-                pose_bone = self.armature.pose.bones.get(bone_name)
-                if not pose_bone:
-                    continue
+        track_data_cache = anim_data['tracks']
 
-                track_data = self.animation_data_cache[bone_name]
+        for bone_name, track_data in track_data_cache.items():
+            pose_bone = self.armature.pose.bones.get(bone_name)
+            if not pose_bone:
+                continue
 
+
+            if not pose_bone.parent:
+                mat_parent_rest_inv = pose_bone.bone.matrix_local.inverted()
+            else:
+                mat_parent_rest_inv = pose_bone.parent.bone.matrix_local.inverted()
+
+            mat_rest_local = mat_parent_rest_inv @ pose_bone.bone.matrix_local
+            mat_rest_local_inv = mat_rest_local.inverted()
+
+            # --- 1. Use NumPy to pre-allocate arrays for all transform data ---
+            locations = np.empty((num_frames, 3), dtype=np.float32)
+            rotations = np.empty((num_frames, 4), dtype=np.float32)
+            scales = np.empty((num_frames, 3), dtype=np.float32)
+
+            # --- 2. Calculate all transforms and fill the NumPy arrays ---
+            for frame_idx in range(num_frames):
                 t_idx = frame_idx if len(track_data['T']) > 1 else 0
                 r_idx = frame_idx if len(track_data['R']) > 1 else 0
                 s_idx = frame_idx if len(track_data['S']) > 1 else 0
@@ -1254,38 +1415,43 @@ class TLGAnimReader:
                 rot_data = track_data['R'][r_idx]
                 scl_data = track_data['S'][s_idx]
 
-                if not pose_bone.parent:
-                    mat_parent_rest_inv = pose_bone.bone.matrix_local.inverted()
-                else:
-                    mat_parent_rest_inv = pose_bone.parent.bone.matrix_local.inverted()
-
+                # This is now much faster as we use the pre-calculated inverse
                 mat_anim_local = Matrix.Translation(loc_data) @ rot_data.to_matrix().to_4x4()
-
-                # Calculate the bone's true rest pose relative to its parent.
-
-                mat_rest_local = mat_parent_rest_inv @ pose_bone.bone.matrix_local
-
-                # Calculate the final pose matrix by "removing" the rest pose from the target animation pose.
-                # This gives the delta transform that Blender needs for its pose bones.
-                mat_pose_delta = mat_rest_local.inverted() @ mat_anim_local
+                mat_pose_delta = mat_rest_local_inv @ mat_anim_local
 
                 key_loc, key_rot, _ = mat_pose_delta.decompose()
 
-                frame_float = float(frame_idx + 1)
-                for i in range(3):
-                    fcurves[bone_name]['location'][i].keyframe_points.insert(frame_float, key_loc[i])
-                for i in range(4):
-                    fcurves[bone_name]['rotation'][i].keyframe_points.insert(frame_float, key_rot[i])
-                for i in range(3):
-                    fcurves[bone_name]['scale'][i].keyframe_points.insert(frame_float, scl_data[i])
+                locations[frame_idx] = key_loc
+                rotations[frame_idx] = key_rot
+                scales[frame_idx] = scl_data
 
-        for bone_curves in fcurves.values():
-            for fcurve_list in bone_curves.values():
-                for fcurve in fcurve_list:
+            # --- 3. Batch-load keyframes from the prepared NumPy arrays ---
+            frames = np.arange(1, num_frames + 1, dtype=np.float32)
+
+            def batch_load_fcurves(fcurves, data_array):
+                if not fcurves: return
+                coords = np.empty(num_frames * 2, dtype=np.float32)
+                coords[0::2] = frames
+                for i in range(data_array.shape[1]):
+                    fcurve = fcurves[i]
+                    coords[1::2] = data_array[:, i]
+                    fcurve.keyframe_points.add(num_frames)
+                    fcurve.keyframe_points.foreach_set("co", coords)
                     fcurve.update()
 
-        bpy.context.scene.frame_end = num_frames
-        bpy.context.scene.render.fps = self.header['frame_rate']
+            loc_fcurves = [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].location', index=i) for i in
+                           range(3)]
+            batch_load_fcurves(loc_fcurves, locations)
+
+            rot_fcurves = [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].rotation_quaternion', index=i) for i
+                           in range(4)]
+            batch_load_fcurves(rot_fcurves, rotations)
+
+            scl_fcurves = [action.fcurves.new(data_path=f'pose.bones["{bone_name}"].scale', index=i) for i in range(3)]
+            batch_load_fcurves(scl_fcurves, scales)
+
+        bpy.context.scene.frame_end = max(bpy.context.scene.frame_end, num_frames)
+        bpy.context.scene.render.fps = anim_data['frame_rate']
         bpy.ops.object.mode_set(mode='OBJECT')
 
 
